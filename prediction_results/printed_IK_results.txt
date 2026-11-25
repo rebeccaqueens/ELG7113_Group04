@@ -1,0 +1,35 @@
+Left arm:
+Total IK attempts: 227425
+Frames moved: 1957
+Frames with no acceptable IK: 2225
+Frames held because the other arm failed: 0
+Mean position error: 0.127 mm
+Maximum position error: 0.998 mm
+Location of maximum position error: gesture G2
+Mean orientation error: 0.006 degrees
+Frames with clipped joint targets: 328
+
+Right arm:
+Total IK attempts: 77686
+Frames moved: 1957
+Frames with no acceptable IK: 697
+Frames held because the other arm failed: 1528
+Mean position error: 0.020 mm
+Maximum position error: 0.984 mm
+Location of maximum position error: gesture G3
+Mean orientation error: 0.001 degrees
+Frames with clipped joint targets: 125
+
+LEFT ARM — RESULTS BY GESTURE
+Gesture    Requested   Executed   Accepted (%)   Mean pos (mm)   Mean ori (deg)
+-------------------------------------------------------------------------------
+G2               996        879           88.3           0.154            0.009
+G3              2760        652           23.6           0.164            0.007
+G6               426        426          100.0           0.013            0.001
+
+RIGHT ARM — RESULTS BY GESTURE
+Gesture    Requested   Executed   Accepted (%)   Mean pos (mm)   Mean ori (deg)
+-------------------------------------------------------------------------------
+G2               996        879           88.3           0.014            0.001
+G3              2760        652           23.6           0.009            0.000
+G6               426        426          100.0           0.051            0.003

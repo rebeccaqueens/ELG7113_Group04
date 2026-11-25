@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Virtual environments
+venv/
+.venv/
+pytorch-env/
+pytorch-desktop/
+pytorch-laptop/
+
+# Datasets
+JIGSAWS/
+data/
+
+# Trained models
+*.pth
+*.pt
+*.ckpt
+
+# Training logs
+training_logs/
+
+# IDE files
+.vscode/
+
+# OS junk
+.DS_Store
+Thumbs.db

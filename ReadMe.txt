@@ -9,3 +9,9 @@ Simulation Code:
 
 -> SimulationCode.py - code using one robotic arm with build in gestures for testing
 -> SimulationBothArms.py - code using two mirrored robotic sim arms and build in gestures for testing 
+
+
+Connected Code: 
+-> run_gesture_simulation.py (connection) 
+-> gesture_recognixer.py
+-> gesture_simulator.py
