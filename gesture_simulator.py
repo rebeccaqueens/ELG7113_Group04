@@ -5,7 +5,8 @@ import trimesh
 import pybullet as p
 import math
 import matplotlib.pyplot as plt
-import cv2 
+import cv2
+import json
 
 from pathlib import Path
 from scipy.spatial.transform import Rotation
@@ -516,10 +517,79 @@ def print_gesture_results(arm, labels):
             f"{position_text:>16}"
             f"{orientation_text:>17}"
         )
+def plan_start_transition(arms, saved_arms, first_rows):
+    """Check a gradual move from the current joints to the saved start."""
+    current = [
+        np.array([p.getJointState(arm.robot, joint)[0] for joint in arm.joints])
+        for arm in arms
+    ]
+    targets = [
+        np.asarray(saved["joint_values"], dtype=float)
+        for saved in saved_arms
+    ]
 
+    if len(targets) != len(arms):
+        return None
+
+    duration = 1.0
+    for arm, saved, start, target in zip(arms, saved_arms, current, targets):
+        if (
+            saved["joint_indices"] != list(arm.joints)
+            or target.shape != start.shape
+            or not np.isfinite(target).all()
+            or np.any(target < arm.lower - 1e-8)
+            or np.any(target > arm.upper + 1e-8)
+        ):
+            return None
+
+        for joint, delta in zip(arm.joints, np.abs(target - start)):
+            joint_type = p.getJointInfo(arm.robot, joint)[2]
+            speed = 0.05 if joint_type == p.JOINT_PRISMATIC else 0.5
+            duration = max(duration, 1.5 * delta / speed)
+
+    frame_count = max(1, math.ceil(duration * sample_rate * playback_speed))
+    steps = []
+
+    for i in range(1, frame_count + 1):
+        t = i / frame_count
+        blend = t * t * (3 - 2 * t)
+        pair = [
+            start + blend * (target - start)
+            for start, target in zip(current, targets)
+        ]
+        if not all(arm.arm_is_above_skin(q)[0] for arm, q in zip(arms, pair)):
+            return None
+        steps.append(pair)
+
+    # The checker robots are now at the saved endpoint. Verify that it
+    # still matches the first trajectory frame in this simulator.
+    for arm, row in zip(arms, first_rows):
+        state = p.getLinkState(
+            arm.checker_robot,
+            arm.tool_tip,
+            computeForwardKinematics=True,
+            physicsClientId=checker_client,
+        )
+        position_error = 1000 * np.linalg.norm(np.asarray(state[4]) - row[1:4])
+        orientation_error = np.degrees((
+            Rotation.from_quat(row[4:8]).inv() *
+            Rotation.from_quat(state[5])
+        ).magnitude())
+
+        if (
+            position_error > max_position_error_mm
+            or orientation_error > max_orientation_error_deg
+        ):
+            return None
+
+    return steps
 
 def run(gesture_requests, report_result):
     global gestures, checker_client
+    starts_path = Path(__file__).resolve().parent / "gesture_start_poses.json"
+    if not starts_path.is_file():
+        raise FileNotFoundError(f"Run SimulationBothArms.py first to create {starts_path}")
+    saved_starts = json.loads(starts_path.read_text(encoding="utf-8"))
     runtime_start = time.perf_counter()
     gestures = {}
 
@@ -650,6 +720,35 @@ def run(gesture_requests, report_result):
     try:
         left = Arm("Left", robot_id, original_path, 42)
         right = Arm("Right", robot_id_2, mirrored_path, 43)
+        g1_starts = saved_starts.get("G1", [])
+        if not g1_starts or len(g1_starts[0]["arms"]) != 2:
+            raise ValueError("The JSON needs a saved G1 start for both arms.")
+
+        startup = []
+        for arm, saved in zip((left, right), g1_starts[0]["arms"]):
+            q = np.asarray(saved["joint_values"], dtype=float)
+
+            if (
+                saved["joint_indices"] != list(arm.joints)
+                or q.shape != (len(arm.joints),)
+                or not np.isfinite(q).all()
+                or np.any(q < arm.lower - 1e-8)
+                or np.any(q > arm.upper + 1e-8)
+            ):
+                raise ValueError(f"{arm.name}: saved G1 joints do not match this robot.")
+
+            clear, blocked_links = arm.arm_is_above_skin(q)
+            if not clear:
+                links = ", ".join(link["name"] for link in blocked_links)
+                raise ValueError(f"{arm.name}: saved G1 start fails skin clearance ({links}).")
+
+            startup.append((arm, q))
+
+        for arm, q in startup:
+            for joint, value in zip(arm.joints, q):
+                p.resetJointState(arm.robot, joint, float(value))
+
+        print("Both arms initialized at the saved G1 start pose.")
         # Independent starting points 10 cm apart on the skin.
         # These are chosen placements; the averaged files do not retain the
         # recorded separation between the two tools.
@@ -712,11 +811,53 @@ def run(gesture_requests, report_result):
             if not p.isConnected(0):
                 break
 
-            # Keep the original trajectory conversion and chain the target positions.
-            left_trajectory, left_labels = build_trajectory(left, 1, left_start, [gesture_name])
-            right_trajectory, gesture_right_labels = build_trajectory(
-                right, 15, right_start, [gesture_name]
-            )
+            if gesture_name not in gestures:
+                raise ValueError(f"Missing averaged CSV for {gesture_name}")
+
+            arms = (left, right)
+            steps = None
+
+            for entry in saved_starts.get(gesture_name, []):
+                saved_arms = entry["arms"]
+                left_trajectory, left_labels = build_trajectory(
+                    left, 1, saved_arms[0]["xyz"], [gesture_name]
+                )
+                right_trajectory, gesture_right_labels = build_trajectory(
+                    right, 15, saved_arms[1]["xyz"], [gesture_name]
+                )
+                steps = plan_start_transition(
+                    arms, saved_arms, (left_trajectory[0], right_trajectory[0])
+                )
+                if steps is not None:
+                    break
+
+            if steps is None:
+                print(f"{gesture_name}: no usable approach to a saved start pose.")
+                report_result(gesture_name, 0, len(gestures[gesture_name]), 0)
+                continue
+
+            print(f"{gesture_name}: moving both arms to the saved start pose.")
+            transition_start = time.monotonic()
+            fps = sample_rate * playback_speed
+
+            for i, pair in enumerate(steps, start=1):
+                remaining = transition_start + i / fps - time.monotonic()
+                if remaining > 0:
+                    time.sleep(remaining)
+
+                if not p.isConnected(0):
+                    break
+
+                for arm, joint_values in zip(arms, pair):
+                    for joint, value in zip(arm.joints, joint_values):
+                        p.resetJointState(arm.robot, joint, float(value))
+
+                record_frame()
+
+            if not p.isConnected(0):
+                report_result(gesture_name, 0, len(left_trajectory), 0)
+                break
+
             first_frame = len(labels)
             labels.extend(left_labels)
             right_labels.extend(gesture_right_labels)
@@ -725,6 +866,8 @@ def run(gesture_requests, report_result):
             rejected_before = paired_rejections
             processed = 0
             playback_start = time.monotonic()
+
+            
             for left_row, right_row in zip(left_trajectory, right_trajectory):
                 if not p.isConnected(0):
                     break
@@ -738,8 +881,12 @@ def run(gesture_requests, report_result):
                     target_xyz = row[1:4]
                     target_rotation = Rotation.from_quat(row[4:8])
                     preferred = np.array([p.getJointState(arm.robot, j)[0] for j in arm.joints])
-                    candidate, clipped, attempts, message = arm.find_safe_ik(
-                        target_xyz, target_rotation, preferred)
+                    if frame == first_frame:
+                        candidate, clipped, attempts, message = preferred, False, 0, ""
+                    else:
+                        candidate, clipped, attempts, message = arm.find_safe_ik(
+                            target_xyz, target_rotation, preferred
+                        )
                     arm.total_attempts += attempts
                     if candidate is None:
                         arm.ik_failures += 1
@@ -773,13 +920,7 @@ def run(gesture_requests, report_result):
                                         "limits_clipped": clipped, "joint_targets": candidate.copy()})
 
             attempted_frames += processed
-            # As in the original, skipped frames do not change the next target origin.
-            left_start = np.array(
-                p.getLinkState(left.robot, left.tool_tip, computeForwardKinematics=True)[4]
-            )
-            right_start = np.array(
-                p.getLinkState(right.robot, right.tool_tip, computeForwardKinematics=True)[4]
-            )
+            
             report_result(
                 gesture_name, processed, len(left_trajectory),
                 paired_rejections - rejected_before,

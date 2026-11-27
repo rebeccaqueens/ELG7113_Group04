@@ -5,6 +5,7 @@ import trimesh
 import pybullet as p
 import math
 import matplotlib.pyplot as plt
+import json
 
 from pathlib import Path
 from scipy.spatial.transform import Rotation
@@ -679,6 +680,15 @@ try:
     print("Left starting XYZ:", left_start)
     print("Right starting XYZ:", right_start)
     print("Total paired frames:", len(left_trajectory))
+
+    saved_starts = {}
+    gesture_start_frames = set()
+    start_frame = 0
+
+    for label in gesture_order:
+        gesture_start_frames.add(start_frame)
+        start_frame += len(gestures[label])
+    
     paired_rejections = 0
     playback_start = time.monotonic()
     for left_row, right_row in zip(left_trajectory, right_trajectory):
@@ -716,14 +726,40 @@ try:
                     p.resetJointState(arm.robot, joint, float(value))
         finally:
             p.configureDebugVisualizer(p.COV_ENABLE_RENDERING, 1)
+
+        # Save only the first accepted start for each gesture label.
+        label = labels[frame]
+        if frame in gesture_start_frames and label not in saved_starts:
+            saved_starts[label] = [{
+                "reference_frame": frame,
+                "arms": [
+                    {
+                        "xyz": row[1:4].tolist(),
+                        "quaternion": row[4:8].tolist(),
+                        "joint_indices": list(arm.joints),
+                        "joint_values": candidate.tolist(),
+                    }
+                    for arm, row, candidate, _ in plans
+                ],
+            }]
+
         for arm, row, candidate, clipped in plans:
-            state = p.getLinkState(arm.robot, arm.tool_tip, computeForwardKinematics=True)
+            state = p.getLinkState(
+                arm.robot, arm.tool_tip, computeForwardKinematics=True
+            )
             position_error = np.linalg.norm(np.array(state[4]) - row[1:4]) * 1000
             orientation_error = np.degrees((
-                Rotation.from_quat(row[4:8]).inv() * Rotation.from_quat(state[5])).magnitude())
-            arm.results.append({"frame": frame, "position_error_mm": position_error,
-                                "orientation_error_deg": orientation_error,
-                                "limits_clipped": clipped, "joint_targets": candidate.copy()})
+                Rotation.from_quat(row[4:8]).inv()
+                * Rotation.from_quat(state[5])
+            ).magnitude())
+            arm.results.append({
+                "frame": frame,
+                "position_error_mm": position_error,
+                "orientation_error_deg": orientation_error,
+                "limits_clipped": clipped,
+                "joint_targets": candidate.copy(),
+            })
+
     print("\nPaired frames rejected (both arms held):", paired_rejections)
     print_summary(left, labels)
     print_summary(right, labels)
@@ -733,11 +769,18 @@ try:
     print_summary(left, labels)
     print_summary(right, right_labels)
 
-# Print the per-gesture tables for both arms.
+    # Print the per-gesture tables for both arms.
     print_gesture_results(left, labels)
     print_gesture_results(right, right_labels)
 
 
+    starts_path = Path(__file__).resolve().parent / "gesture_start_poses.json"
+    starts_path.write_text(json.dumps(saved_starts, indent=2), encoding="utf-8")
+    print(f"Saved gesture starts to: {starts_path}")
+
+    missing = sorted(set(gesture_order) - saved_starts.keys())
+    if missing:
+        print("No accepted starting pose for:", ", ".join(missing))
 
     while p.isConnected(0):
         time.sleep(1 / 60)

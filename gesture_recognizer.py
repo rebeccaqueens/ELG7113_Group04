@@ -7,6 +7,8 @@ import cv2
 import numpy as np
 import torch
 import torch.nn as nn
+import time
+
 
 from torchvision.models.video import (
     r3d_18,
@@ -468,7 +470,8 @@ def iter_predictions():
 
         prediction_count = 0
 
-
+        video_start = time.monotonic()
+        
         while True:
 
             success, frame = video.read()
@@ -479,6 +482,10 @@ def iter_predictions():
 
 
             frame_number += 1
+            due = video_start + (frame_number - 1) / fps
+            remaining = due - time.monotonic()
+            if remaining > 0:
+                time.sleep(remaining)
 
 
             prediction = None
